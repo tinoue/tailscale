@@ -62,7 +62,7 @@ func osVersionLinux() string {
 	if inKnative() {
 		attrBuf.WriteString("; env=kn")
 	}
-	if inAwsLambda() {
+	if inAWSLambda() {
 		attrBuf.WriteString("; env=lm")
 	}
 	if inHerokuDyno() {
@@ -128,7 +128,7 @@ func inKnative() bool {
 	return false
 }
 
-func inAwsLambda() bool {
+func inAWSLambda() bool {
 	// https://docs.aws.amazon.com/lambda/latest/dg/configuration-envvars.html
 	if os.Getenv("AWS_LAMBDA_FUNCTION_NAME") != "" &&
 		os.Getenv("AWS_LAMBDA_FUNCTION_VERSION") != "" &&
@@ -138,6 +138,7 @@ func inAwsLambda() bool {
 	}
 	return false
 }
+
 func inHerokuDyno() bool {
 	// https://devcenter.heroku.com/articles/dynos#local-environment-variables
 	if os.Getenv("PORT") != "" && os.Getenv("DYNO") != "" {

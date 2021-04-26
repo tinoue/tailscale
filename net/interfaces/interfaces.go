@@ -81,13 +81,16 @@ func isProblematicInterface(nif *net.Interface) bool {
 }
 
 // LocalAddresses returns the machine's IP addresses, separated by
-// whether they're loopback addresses.
+// whether they're loopback addresses. If there are no regular addresses
+// it will return any IPv4 linklocal or IPv6 unique local addresses because we
+// know of environments where these are used with NAT to provide connectivity.
 func LocalAddresses() (regular, loopback []netaddr.IP, err error) {
 	// TODO(crawshaw): don't serve interface addresses that we are routing
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil, nil, err
 	}
+	var regular4, regular6, linklocal4, ula6 []netaddr.IP
 	for i := range ifaces {
 		iface := &ifaces[i]
 		if !isUp(iface) || isProblematicInterface(iface) {
@@ -117,17 +120,41 @@ func LocalAddresses() (regular, loopback []netaddr.IP, err error) {
 				if tsaddr.IsTailscaleIP(ip) {
 					continue
 				}
-				if ip.IsLinkLocalUnicast() {
-					continue
-				}
 				if ip.IsLoopback() || ifcIsLoopback {
 					loopback = append(loopback, ip)
+				} else if isIp4LinkLocalUsable(ip) {
+					// In AWS Lambda, NAT for 169.254.x.x is the
+					// only connectivity.
+					linklocal4 = append(linklocal4, ip)
+
+					// We know of no cases where the IPv6 fe80:: addresses
+					// are used to provide WAN connectivity. It is also very
+					// common for users to have no IPv6 WAN connectivity,
+					// but their OS supports IPv6 so they have an fe80::
+					// address. We don't report IPv6 LL to Control.
+				} else if ip.Is6() && tsaddr.IsULA(ip) {
+					// Google Cloud Run uses NAT with IPv6 Unique
+					// Local Addresses to provide IPv6 connectivity.
+					ula6 = append(ula6, ip)
 				} else {
-					regular = append(regular, ip)
+					if ip.Is4() {
+						regular4 = append(regular4, ip)
+					} else {
+						regular6 = append(regular6, ip)
+					}
 				}
 			}
 		}
 	}
+	if len(regular4) == 0 && len(regular6) == 0 {
+		// if we have no usable IP addresses then be willing to accept
+		// addresses we otherwise wouldn't, like:
+		//   + 169.254.x.x (AWS Lambda uses NAT with these)
+		//   + IPv6 ULA (Google Cloud Run uses these with address translation)
+		regular4 = linklocal4
+		regular6 = ula6
+	}
+	regular = append(regular4, regular6...)
 	sortIPs(regular)
 	sortIPs(loopback)
 	return regular, loopback, nil
@@ -213,12 +240,13 @@ type State struct {
 	InterfaceIPs map[string][]netaddr.IPPrefix
 	Interface    map[string]Interface
 
-	// HaveV6Global is whether this machine has an IPv6 global address
-	// on some non-Tailscale interface that's up.
-	HaveV6Global bool
+	// HaveV6 is whether this machine has an IPv6 non-linklocal and
+	// non-localhost address which might provide connectivity on a non-Tailscale
+	// interface that's up.
+	HaveV6 bool
 
-	// HaveV4 is whether the machine has some non-localhost,
-	// non-link-local IPv4 address on a non-Tailscale interface that's up.
+	// HaveV4 is whether the machine has a non-localhost IPv4 Address which
+	// might provide connectivity on a non-Tailscale interface that's up.
 	HaveV4 bool
 
 	// IsExpensive is whether the current network interface is
@@ -248,6 +276,7 @@ func (s *State) String() string {
 			ifs = append(ifs, k)
 		}
 	}
+
 	sort.Slice(ifs, func(i, j int) bool {
 		upi, upj := s.Interface[ifs[i]].IsUp(), s.Interface[ifs[j]].IsUp()
 		if upi != upj {
@@ -289,7 +318,7 @@ func (s *State) String() string {
 	if s.PAC != "" {
 		fmt.Fprintf(&sb, " pac=%s", s.PAC)
 	}
-	fmt.Fprintf(&sb, " v4=%v v6global=%v}", s.HaveV4, s.HaveV6Global)
+	fmt.Fprintf(&sb, " v4=%v v6=%v}", s.HaveV4, s.HaveV6)
 	return sb.String()
 }
 
@@ -302,7 +331,7 @@ func (s *State) EqualFiltered(s2 *State, filter func(i Interface, ips []netaddr.
 	if s == nil || s2 == nil {
 		return false
 	}
-	if s.HaveV6Global != s2.HaveV6Global ||
+	if s.HaveV6 != s2.HaveV6 ||
 		s.HaveV4 != s2.HaveV4 ||
 		s.IsExpensive != s2.IsExpensive ||
 		s.DefaultRouteInterface != s2.DefaultRouteInterface ||
@@ -362,7 +391,7 @@ func (s *State) HasPAC() bool { return s != nil && s.PAC != "" }
 
 // AnyInterfaceUp reports whether any interface seems like it has Internet access.
 func (s *State) AnyInterfaceUp() bool {
-	return s != nil && (s.HaveV4 || s.HaveV6Global)
+	return s != nil && (s.HaveV4 || s.HaveV6)
 }
 
 func hasTailscaleIP(pfxs []netaddr.IPPrefix) bool {
@@ -407,10 +436,10 @@ func GetState() (*State, error) {
 			return
 		}
 		for _, pfx := range pfxs {
-			if pfx.IP().IsLoopback() || pfx.IP().IsLinkLocalUnicast() {
+			if pfx.IP().IsLoopback() {
 				continue
 			}
-			s.HaveV6Global = s.HaveV6Global || isGlobalV6(pfx.IP())
+			s.HaveV6 = s.HaveV6 || isUsableV6(pfx.IP())
 			s.HaveV4 = s.HaveV4 || pfx.IP().Is4()
 		}
 	}); err != nil {
@@ -503,7 +532,10 @@ func isPrivateIP(ip netaddr.IP) bool {
 	return private1.Contains(ip) || private2.Contains(ip) || private3.Contains(ip)
 }
 
-func isGlobalV6(ip netaddr.IP) bool {
+// A usable IPv6 address is one which could conceivably be used to get Internet
+// connectivity. Globally routable IPv6 addresses are always Usable, and Unique
+// Local Addresses (fc00::/7) are in some environments used with address translation.
+func isUsableV6(ip netaddr.IP) bool {
 	return v6Global1.Contains(ip) ||
 		(tsaddr.IsULA(ip) && !tsaddr.TailscaleULARange().Contains(ip))
 }

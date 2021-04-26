@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/jsimonetti/rtnetlink"
 	"go4.org/mem"
 	"inet.af/netaddr"
 	"tailscale.com/syncs"
@@ -229,4 +230,56 @@ func defaultRouteInterfaceAndroidIPRoute() (ifname string, err error) {
 		return "", errors.New("no default routes found")
 	}
 	return ifname, nil
+}
+
+// AWS Lambda's only connectivity is via IPv4 link-local addresses statically
+// added with global scope
+// 12: vtarget_1@if11: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default qlen 1000
+//     link/ether 7e:1c:3f:00:00:00 brd ff:ff:ff:ff:ff:ff link-netnsid 1
+//     inet 169.254.79.1/32 scope global vtarget_1
+//     valid_lft forever preferred_lft forever
+//
+// When a link-local address is added by avahi-autoipd, it sets the address to link scope.
+// 2:  eth0@if64: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default qlen 1000
+//     link/ether 4a:77:06:00:00:00 brd ff:ff:ff:ff:ff:ff link-netnsid 0
+//     inet 169.254.10.89/16 brd 169.254.255.255 scope link eth0:avahi
+//     valid_lft forever preferred_lft forever
+//
+// We consider an IPv4 link-local address to be potentially usable for connectivity
+// if it was added with global scope.
+func isIp4LinkLocalUsable(ip netaddr.IP) bool {
+	if runtime.GOOS == "android" {
+		return false
+	}
+
+	if !ip.Is4() || !ip.IsLinkLocalUnicast() {
+		return false
+	}
+
+	conn, err := rtnetlink.Dial(nil)
+	if err != nil {
+		log.Printf("isIp4LinkLocalUsable(%s) rtnetlink.Dial: %v", ip, err)
+		return false
+	}
+	defer conn.Close()
+
+	rx, err := conn.Address.List()
+	if err != nil {
+		log.Printf("isIp4LinkLocalUsable(%s) conn.Address.List: %v", ip, err)
+		return false
+	}
+	for _, m := range rx {
+		addr, ok := netaddr.FromStdIP(m.Attributes.Address)
+		if !ok {
+			log.Printf("isIp4LinkLocalUsable(%s) netaddr.FromStdIP failed", ip)
+			return false
+		}
+
+		if addr == ip {
+			const ScopeGlobal = 0 // RT_SCOPE_UNIVERSE, RT_SCOPE_LINK = 253
+			return m.Scope == ScopeGlobal
+		}
+	}
+
+	return false
 }
