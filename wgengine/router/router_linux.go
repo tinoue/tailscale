@@ -375,7 +375,7 @@ func (r *linuxRouter) addAddress(addr netaddr.IPPrefix) error {
 	if !r.v6Available && addr.IP.Is6() {
 		return nil
 	}
-	if err := r.cmd.run("ip", "addr", "add", addr.String(), "dev", r.tunname); err != nil {
+	if err := r.cmd.run("ip", "addr", "add", addr.String(), "dev", r.tunname, "noprefixroute"); err != nil {
 		return fmt.Errorf("adding address %q to tunnel interface: %w", addr, err)
 	}
 	if err := r.addLoopbackRule(addr.IP); err != nil {

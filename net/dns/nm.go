@@ -138,10 +138,15 @@ func (m *nmManager) trySet(ctx context.Context, config OSConfig) error {
 		}
 	}
 
-	// NetworkManager wipes out IPv6 address configuration unless we
-	// tell it explicitly to keep it. Read out the current interface
-	// settings and mirror them out to NetworkManager.
-	var addrs6 []map[string]interface{}
+	// NetworkManager requires setting a non-disabled method to
+	// configure DNS, but also wipes out any configuration it doesn't
+	// know about if you do. So, when setting DNS, we figure out the
+	// current Tailscale IPs and mirror those back into
+	// NetworkManager.
+	var (
+		addrs4 []map[string]interface{}
+		addrs6 []map[string]interface{}
+	)
 	addrs, _, err := interfaces.Tailscale()
 	if err == nil {
 		for _, a := range addrs {
@@ -149,6 +154,11 @@ func (m *nmManager) trySet(ctx context.Context, config OSConfig) error {
 				addrs6 = append(addrs6, map[string]interface{}{
 					"address": a.String(),
 					"prefix":  uint32(128),
+				})
+			} else {
+				addrs4 = append(addrs4, map[string]interface{}{
+					"address": a.String(),
+					"prefix":  uint32(32),
 				})
 			}
 		}
@@ -180,6 +190,13 @@ func (m *nmManager) trySet(ctx context.Context, config OSConfig) error {
 	general["mdns"] = dbus.MakeVariant(0)
 
 	ipv4Map := settings["ipv4"]
+	ipv4Map["method"] = dbus.MakeVariant("manual")
+	if len(addrs4) > 0 {
+		ipv4Map["address-data"] = dbus.MakeVariant(addrs4)
+	}
+	ipv4Map["ignore-auto-routes"] = dbus.MakeVariant(true)
+	ipv4Map["ignore-auto-dns"] = dbus.MakeVariant(true)
+	ipv4Map["never-default"] = dbus.MakeVariant(true)
 	ipv4Map["dns"] = dbus.MakeVariant(dnsv4)
 	ipv4Map["dns-search"] = dbus.MakeVariant(search)
 	// We should only request priority if we have nameservers to set.
