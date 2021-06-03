@@ -260,7 +260,7 @@ func (t *Wrapper) poll() {
 		// Read may use memory in t.buffer before PacketStartOffset for mandatory headers.
 		// This is the rationale behind the tun.Wrapper.{Read,Write} interfaces
 		// and the reason t.buffer has size MaxMessageSize and not MaxContentSize.
-		n, err := t.tdev.Read(t.buffer[:], PacketStartOffset)
+		n, err := t.read(t.buffer[:], PacketStartOffset)
 		if err != nil {
 			select {
 			case <-t.closed:
@@ -520,6 +520,21 @@ func (t *Wrapper) write(buf []byte, offset int) (int, error) {
 		err = os.ErrClosed
 	}
 	return n, err
+}
+
+func (t *Wrapper) read(buf []byte, offset int) (n int, err error) {
+	// TODO: upstream has graceful shutdown error handling here.
+	buff := buf[offset-4:]
+	n, err = t.ring.Read(buff[:])
+	if errors.Is(err, syscall.EBADFD) {
+		err = os.ErrClosed
+	}
+	if n < 4 {
+		n = 0
+	} else {
+		n -= 4
+	}
+	return
 }
 
 func (t *Wrapper) GetFilter() *filter.Filter {
