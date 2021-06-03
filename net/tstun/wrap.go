@@ -148,11 +148,6 @@ func Wrap(logf logger.Logf, tdev tun.Device) *Wrapper {
 		filterFlags: filter.LogAccepts | filter.LogDrops,
 	}
 
-	go tun.poll()
-	go tun.pumpEvents()
-	// The buffer starts out consumed.
-	tun.bufferConsumed <- struct{}{}
-
 	f := tdev.(*wgtun.NativeTun).File()
 	ring, err := uring.NewFile(f)
 	if err != nil {
@@ -160,6 +155,12 @@ func Wrap(logf logger.Logf, tdev tun.Device) *Wrapper {
 	} else {
 		tun.ring = ring
 	}
+
+	go tun.poll()
+	go tun.pumpEvents()
+	// The buffer starts out consumed.
+	tun.bufferConsumed <- struct{}{}
+
 	return tun
 }
 
