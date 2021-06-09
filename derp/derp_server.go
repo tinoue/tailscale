@@ -225,14 +225,15 @@ func (s *Server) PublicKey() key.Public { return s.publicKey }
 
 // Returns a (possibly-reused) byte slice of the given length
 func (s *Server) empty_bytes(length uint32) []byte {
-	zeroed := s.bytes_pool.Get().([]byte)
-	for i := range zeroed {
-		zeroed[i] = 0
+	zeroed := s.bytes_pool.Get().(*[]byte)
+	slice := *zeroed
+	for i := range slice {
+		slice[i] = 0
 	}
-	if uint32(cap(zeroed)) >= length {
-		return zeroed[:length]
+	if uint32(cap(slice)) >= length {
+		return slice[:length]
 	}
-	return append(zeroed, make([]byte, length-uint32(len(zeroed)))...)
+	return append(slice, make([]byte, length-uint32(len(slice)))...)
 }
 
 // Close closes the server and waits for the connections to disconnect.
@@ -675,7 +676,7 @@ func (c *sclient) handleFrameSendPacket(ft frameType, fl uint32) error {
 				// TODO:
 				return nil
 			}
-      s.bytes_pool.Put(contents)
+			s.bytes_pool.Put(&contents)
 			return nil
 		}
 		s.packetsDropped.Add(1)
@@ -731,7 +732,7 @@ func (c *sclient) sendPkt(dst *sclient, p pkt) error {
 			if debug {
 				c.logf("dropping packet from client %x queue head", dstKey)
 			}
-			s.bytes_pool.Put(dropped_pkt.bs)
+			s.bytes_pool.Put(&dropped_pkt.bs)
 		default:
 		}
 	}
@@ -780,7 +781,7 @@ func (s *Server) verifyClient(clientKey key.Public, info *clientInfo) error {
 }
 
 func (s *Server) sendServerKey(bw *bufio.Writer) error {
-	buf := s.empty_bytes(uint32(len(magic)+len(s.publicKey)))[:0] //make([]byte, 0, len(magic)+len(s.publicKey))
+	buf := s.empty_bytes(uint32(len(magic) + len(s.publicKey)))[:0] //make([]byte, 0, len(magic)+len(s.publicKey))
 	buf = append(buf, magic...)
 	buf = append(buf, s.publicKey[:]...)
 	return writeFrame(bw, frameServerKey, buf)
@@ -1189,7 +1190,7 @@ func (c *sclient) sendPacket(srcKey key.Public, contents []byte) (err error) {
 		}
 	}
 	_, err = c.bw.Write(contents)
-  c.s.bytes_pool.Put(contents)
+	c.s.bytes_pool.Put(&contents)
 	return err
 }
 
