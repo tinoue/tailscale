@@ -47,6 +47,10 @@ var debug, _ = strconv.ParseBool(os.Getenv("DERP_DEBUG_LOGS"))
 // verbosely log whenever DERP drops a packet.
 var verboseDropKeys = map[key.Public]bool{}
 
+// Stores empty content byte buffers after they've been used, so further allocations
+// do not need to allocate more
+var bytesPool = new(sync.Pool) // of *byte
+
 func init() {
 	keys := os.Getenv("TS_DEBUG_VERBOSE_DROPS")
 	if keys == "" {
@@ -141,10 +145,6 @@ type Server struct {
 	// because it includes intra-region forwarded packets as the
 	// src.
 	sentTo map[key.Public]map[key.Public]int64 // src => dst => dst's latest sclient.connNum
-
-	// Stores empty content byte buffers after they've been used, so further allocations
-	// do not need to allocate more
-	bytes_pool *sync.Pool
 }
 
 // PacketForwarder is something that can forward packets.
@@ -223,17 +223,22 @@ func (s *Server) PrivateKey() key.Private { return s.privateKey }
 // PublicKey returns the server's public key.
 func (s *Server) PublicKey() key.Public { return s.publicKey }
 
-// Returns a (possibly-reused) byte slice of the given length
-func (s *Server) empty_bytes(length uint32) []byte {
-	zeroed := s.bytes_pool.Get().(*[]byte)
-	slice := *zeroed
+// emptyBytes returns a (possibly-reused) byte slice of the given length.
+func emptyBytes(length int) []byte {
+	bp, _ := bytesPool.Get().(*[]byte)
+	if bp == nil {
+		return make([]byte, length)
+	}
+	slice := *bp
+	if cap(slice) < length {
+		bytesPool.Put(bp)
+		return make([]byte, length)
+	}
+	slice = slice[:length]
 	for i := range slice {
 		slice[i] = 0
 	}
-	if uint32(cap(slice)) >= length {
-		return slice[:length]
-	}
-	return append(slice, make([]byte, length-uint32(len(slice)))...)
+	return slice
 }
 
 // Close closes the server and waits for the connections to disconnect.
@@ -655,6 +660,7 @@ func (c *sclient) handleFrameSendPacket(ft frameType, fl uint32) error {
 	s := c.s
 
 	dstKey, contents, err := s.recvPacket(c.br, fl)
+
 	if err != nil {
 		return fmt.Errorf("client %x: recvPacket: %v", c.key, err)
 	}
@@ -676,7 +682,6 @@ func (c *sclient) handleFrameSendPacket(ft frameType, fl uint32) error {
 				// TODO:
 				return nil
 			}
-			s.bytes_pool.Put(&contents)
 			return nil
 		}
 		s.packetsDropped.Add(1)
@@ -688,9 +693,9 @@ func (c *sclient) handleFrameSendPacket(ft frameType, fl uint32) error {
 	}
 
 	return c.sendPkt(dst, pkt{
-		bs:  contents,
+		bs:         contents,
 		enqueuedAt: time.Now(),
-		src: c.key,
+		src:        c.key,
 	})
 }
 
@@ -732,7 +737,6 @@ func (c *sclient) sendPkt(dst *sclient, p pkt) error {
 			if debug {
 				c.logf("dropping packet from client %x queue head", dstKey)
 			}
-			s.bytes_pool.Put(&dropped_pkt.bs)
 		default:
 		}
 	}
@@ -781,7 +785,7 @@ func (s *Server) verifyClient(clientKey key.Public, info *clientInfo) error {
 }
 
 func (s *Server) sendServerKey(bw *bufio.Writer) error {
-	buf := s.empty_bytes(uint32(len(magic) + len(s.publicKey)))[:0] //make([]byte, 0, len(magic)+len(s.publicKey))
+	buf := emptyBytes(len(magic) + len(s.publicKey))[:0]
 	buf = append(buf, magic...)
 	buf = append(buf, s.publicKey[:]...)
 	return writeFrame(bw, frameServerKey, buf)
@@ -839,7 +843,7 @@ func (s *Server) recvClientKey(br *bufio.Reader) (clientKey key.Public, info *cl
 		return zpub, nil, fmt.Errorf("nonce: %v", err)
 	}
 	msgLen := int(fl - minLen)
-	msgbox := s.empty_bytes(uint32(msgLen)) //make([]byte, msgLen)
+	msgbox := emptyBytes(msgLen)
 	if _, err := io.ReadFull(br, msgbox); err != nil {
 		return zpub, nil, fmt.Errorf("msgbox: %v", err)
 	}
@@ -865,7 +869,7 @@ func (s *Server) recvPacket(br *bufio.Reader, frameLen uint32) (dstKey key.Publi
 	if packetLen > MaxPacketSize {
 		return zpub, nil, fmt.Errorf("data packet longer (%d) than max of %v", packetLen, MaxPacketSize)
 	}
-	contents = s.empty_bytes(packetLen)
+	contents = emptyBytes(int(packetLen))
 	if _, err := io.ReadFull(br, contents); err != nil {
 		return zpub, nil, err
 	}
@@ -896,7 +900,7 @@ func (s *Server) recvForwardPacket(br *bufio.Reader, frameLen uint32) (srcKey, d
 	if packetLen > MaxPacketSize {
 		return zpub, zpub, nil, fmt.Errorf("data packet longer (%d) than max of %v", packetLen, MaxPacketSize)
 	}
-	contents = s.empty_bytes(packetLen)
+	contents = emptyBytes(int(packetLen))
 	if _, err := io.ReadFull(br, contents); err != nil {
 		return zpub, zpub, nil, err
 	}
@@ -1171,6 +1175,7 @@ func (c *sclient) sendPacket(srcKey key.Public, contents []byte) (err error) {
 			c.s.packetsSent.Add(1)
 			c.s.bytesSent.Add(int64(len(contents)))
 		}
+		bytesPool.Put(&contents)
 	}()
 
 	c.setWriteDeadline()
@@ -1190,7 +1195,6 @@ func (c *sclient) sendPacket(srcKey key.Public, contents []byte) (err error) {
 		}
 	}
 	_, err = c.bw.Write(contents)
-	c.s.bytes_pool.Put(&contents)
 	return err
 }
 
