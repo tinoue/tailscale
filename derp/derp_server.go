@@ -141,6 +141,10 @@ type Server struct {
 	// because it includes intra-region forwarded packets as the
 	// src.
 	sentTo map[key.Public]map[key.Public]int64 // src => dst => dst's latest sclient.connNum
+
+	// Stores empty content byte buffers after they've been used, so further allocations
+	// do not need to allocate more
+	bytes_pool *sync.Pool
 }
 
 // PacketForwarder is something that can forward packets.
@@ -218,6 +222,18 @@ func (s *Server) PrivateKey() key.Private { return s.privateKey }
 
 // PublicKey returns the server's public key.
 func (s *Server) PublicKey() key.Public { return s.publicKey }
+
+// Returns a (possibly-reused) byte slice of the given length
+func (s *Server) empty_bytes(length uint32) []byte {
+	zeroed := s.bytes_pool.Get().([]byte)
+	for i := range zeroed {
+		zeroed[i] = 0
+	}
+	if uint32(cap(zeroed)) >= length {
+		return zeroed[:length]
+	}
+	return append(zeroed, make([]byte, length-uint32(len(zeroed)))...)
+}
 
 // Close closes the server and waits for the connections to disconnect.
 func (s *Server) Close() error {
@@ -659,6 +675,7 @@ func (c *sclient) handleFrameSendPacket(ft frameType, fl uint32) error {
 				// TODO:
 				return nil
 			}
+      s.bytes_pool.Put(contents)
 			return nil
 		}
 		s.packetsDropped.Add(1)
@@ -669,12 +686,11 @@ func (c *sclient) handleFrameSendPacket(ft frameType, fl uint32) error {
 		return nil
 	}
 
-	p := pkt{
-		bs:         contents,
+	return c.sendPkt(dst, pkt{
+		bs:  contents,
 		enqueuedAt: time.Now(),
-		src:        c.key,
-	}
-	return c.sendPkt(dst, p)
+		src: c.key,
+	})
 }
 
 func (c *sclient) sendPkt(dst *sclient, p pkt) error {
@@ -702,7 +718,7 @@ func (c *sclient) sendPkt(dst *sclient, p pkt) error {
 		}
 
 		select {
-		case pkt := <-dst.sendQueue:
+		case dropped_pkt := <-dst.sendQueue:
 			s.packetsDropped.Add(1)
 			s.packetsDroppedQueueHead.Add(1)
 			if verboseDropKeys[dstKey] {
@@ -711,10 +727,11 @@ func (c *sclient) sendPkt(dst *sclient, p pkt) error {
 				msg := fmt.Sprintf("tail drop %s -> %s", p.src.ShortString(), dstKey.ShortString())
 				c.s.limitedLogf(msg)
 			}
-			c.recordQueueTime(pkt.enqueuedAt)
+			c.recordQueueTime(dropped_pkt.enqueuedAt)
 			if debug {
 				c.logf("dropping packet from client %x queue head", dstKey)
 			}
+			s.bytes_pool.Put(dropped_pkt.bs)
 		default:
 		}
 	}
@@ -763,7 +780,7 @@ func (s *Server) verifyClient(clientKey key.Public, info *clientInfo) error {
 }
 
 func (s *Server) sendServerKey(bw *bufio.Writer) error {
-	buf := make([]byte, 0, len(magic)+len(s.publicKey))
+	buf := s.empty_bytes(uint32(len(magic)+len(s.publicKey)))[:0] //make([]byte, 0, len(magic)+len(s.publicKey))
 	buf = append(buf, magic...)
 	buf = append(buf, s.publicKey[:]...)
 	return writeFrame(bw, frameServerKey, buf)
@@ -821,7 +838,7 @@ func (s *Server) recvClientKey(br *bufio.Reader) (clientKey key.Public, info *cl
 		return zpub, nil, fmt.Errorf("nonce: %v", err)
 	}
 	msgLen := int(fl - minLen)
-	msgbox := make([]byte, msgLen)
+	msgbox := s.empty_bytes(uint32(msgLen)) //make([]byte, msgLen)
 	if _, err := io.ReadFull(br, msgbox); err != nil {
 		return zpub, nil, fmt.Errorf("msgbox: %v", err)
 	}
@@ -847,7 +864,7 @@ func (s *Server) recvPacket(br *bufio.Reader, frameLen uint32) (dstKey key.Publi
 	if packetLen > MaxPacketSize {
 		return zpub, nil, fmt.Errorf("data packet longer (%d) than max of %v", packetLen, MaxPacketSize)
 	}
-	contents = make([]byte, packetLen)
+	contents = s.empty_bytes(packetLen)
 	if _, err := io.ReadFull(br, contents); err != nil {
 		return zpub, nil, err
 	}
@@ -878,7 +895,7 @@ func (s *Server) recvForwardPacket(br *bufio.Reader, frameLen uint32) (srcKey, d
 	if packetLen > MaxPacketSize {
 		return zpub, zpub, nil, fmt.Errorf("data packet longer (%d) than max of %v", packetLen, MaxPacketSize)
 	}
-	contents = make([]byte, packetLen)
+	contents = s.empty_bytes(packetLen)
 	if _, err := io.ReadFull(br, contents); err != nil {
 		return zpub, zpub, nil, err
 	}
@@ -1172,6 +1189,7 @@ func (c *sclient) sendPacket(srcKey key.Public, contents []byte) (err error) {
 		}
 	}
 	_, err = c.bw.Write(contents)
+  c.s.bytes_pool.Put(contents)
 	return err
 }
 
