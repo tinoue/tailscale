@@ -2,13 +2,14 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package cli
+package main
 
 import (
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"os"
 	"strings"
 
 	"tailscale.com/client/tailscale"
@@ -16,6 +17,22 @@ import (
 
 	"github.com/peterbourgon/ff/v2/ffcli"
 )
+
+// Runs the speedtest command as a commandline program
+func main() {
+	args := os.Args[1:]
+	if err := speedtestCmd.Parse(args); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	err := speedtestCmd.Run(context.Background())
+	if err != nil {
+		if err != flag.ErrHelp {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+	}
+}
 
 // Speedtest command that contains the server and client sub commands.
 var speedtestCmd = &ffcli.Command{

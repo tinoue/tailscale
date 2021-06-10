@@ -107,7 +107,6 @@ change in the future.
 			webCmd,
 			fileCmd,
 			bugReportCmd,
-			speedtestCmd,
 		},
 		FlagSet:   rootfs,
 		Exec:      func(context.Context, []string) error { return flag.ErrHelp },
