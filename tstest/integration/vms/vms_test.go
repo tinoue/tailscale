@@ -8,7 +8,9 @@ package vms
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -17,6 +19,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path"
@@ -39,10 +42,17 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sync/semaphore"
 	"inet.af/netaddr"
+	"tailscale.com/derp"
+	"tailscale.com/derp/derphttp"
 	"tailscale.com/net/interfaces"
+	"tailscale.com/net/stun/stuntest"
+	"tailscale.com/tailcfg"
 	"tailscale.com/tstest"
 	"tailscale.com/tstest/integration"
 	"tailscale.com/tstest/integration/testcontrol"
+	"tailscale.com/types/key"
+	"tailscale.com/types/logger"
+	"tailscale.com/types/nettype"
 )
 
 const (
@@ -499,7 +509,8 @@ func TestVMIntegrationEndToEnd(t *testing.T) {
 
 	rex := distroRex.Unwrap()
 
-	ln, err := net.Listen("tcp", deriveBindhost(t)+":0")
+	bindHost := deriveBindhost(t)
+	ln, err := net.Listen("tcp", bindHost+":0")
 	if err != nil {
 		t.Fatalf("can't make TCP listener: %v", err)
 	}
@@ -507,6 +518,10 @@ func TestVMIntegrationEndToEnd(t *testing.T) {
 	t.Logf("host:port: %s", ln.Addr())
 
 	cs := &testcontrol.Server{}
+
+	derpMap, cancelDERP := runDerp(t, netaddr.MustParseIP(bindHost))
+	defer cancelDERP()
+	cs.DERPMap = derpMap
 
 	var (
 		ipMu  sync.Mutex
@@ -803,6 +818,52 @@ func deriveBindhost(t *testing.T) string {
 
 func TestDeriveBindhost(t *testing.T) {
 	t.Log(deriveBindhost(t))
+}
+
+func runDerp(t *testing.T, ip netaddr.IP) (*tailcfg.DERPMap, func()) {
+	logf := t.Logf
+	var serverPrivateKey key.Private
+	if _, err := rand.Read(serverPrivateKey[:]); err != nil {
+		t.Fatal(err)
+	}
+	d := derp.NewServer(serverPrivateKey, logf)
+
+	httpsrv := httptest.NewUnstartedServer(derphttp.Handler(d))
+	httpsrv.Config.ErrorLog = logger.StdLogger(logf)
+	httpsrv.Config.TLSNextProto = make(map[string]func(*http.Server, *tls.Conn, http.Handler))
+	httpsrv.StartTLS()
+
+	stunAddr, stunCleanup := stuntest.ServeWithPacketListener(t, nettype.Std{})
+
+	m := &tailcfg.DERPMap{
+		Regions: map[int]*tailcfg.DERPRegion{
+			1: &tailcfg.DERPRegion{
+				RegionID:   1,
+				RegionCode: "test",
+				Nodes: []*tailcfg.DERPNode{
+					{
+						Name:         "t1",
+						RegionID:     1,
+						HostName:     "test-node.unused",
+						IPv4:         ip.String(),
+						IPv6:         "none",
+						STUNPort:     stunAddr.Port,
+						DERPTestPort: httpsrv.Listener.Addr().(*net.TCPAddr).Port,
+						STUNTestIP:   ip.String(),
+					},
+				},
+			},
+		},
+	}
+
+	cleanup := func() {
+		httpsrv.CloseClientConnections()
+		httpsrv.Close()
+		d.Close()
+		stunCleanup()
+	}
+
+	return m, cleanup
 }
 
 //lint:ignore U1000 Xe: used when debugging the virtual machines
