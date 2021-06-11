@@ -72,10 +72,11 @@ func StartServer(l *net.TCPListener, maxConnections int, killSignal chan bool) e
 func handleConnection(conn *net.TCPConn, testStateChan chan TestState) {
 	defer conn.Close()
 	var config TestConfig
-	ConfigBuffer := make([]byte, LenBufJSON)
-	err := readJSON(conn, ConfigBuffer, &config)
+	//ConfigBuffer := make([]byte, LenBufJSON)
+	err := readJSON(conn, &config)
+	fmt.Println("test1")
 	if err != nil {
-		//fmt.Println("encountered error:", err)
+		fmt.Println("encountered error:", err)
 		testStateChan <- TestState{failed: true, err: err}
 		return
 	}
@@ -84,6 +85,8 @@ func handleConnection(conn *net.TCPConn, testStateChan chan TestState) {
 		// Start the download test
 		err = downloadServer(conn, config)
 	case "upload":
+	default:
+		err = errors.New("config type wrong")
 	}
 
 	if err != nil {
@@ -99,17 +102,17 @@ func handleConnection(conn *net.TCPConn, testStateChan chan TestState) {
 // when the test is finished, the server will send the end header. Parameters like the size of each message or the time
 // the test takes must be passed in the config parameter.
 func downloadServer(conn *net.TCPConn, config TestConfig) error {
+	fmt.Println("download starting....")
+	encoder := json.NewEncoder(conn)
 	startHeader := Header{Type: Start}
+	err := encoder.Encode(startHeader)
+	if err != nil {
+		fmt.Println("start header")
+		return err
+	}
+	BufData := make([]byte, LenBufJSON+config.MessageSize)
+
 	// capacity that can include headers and data
-	BufData := make([]byte, config.MessageSize, LenBufJSON+config.MessageSize)
-	startBytes, err := marshalJSON(startHeader)
-	if err != nil {
-		return err
-	}
-	_, err = conn.Write(startBytes)
-	if err != nil {
-		return err
-	}
 	testDuration := time.Second * time.Duration(config.Time)
 	for startTime := time.Now(); time.Since(startTime) < testDuration; {
 		// Reset the slices length
@@ -121,27 +124,33 @@ func downloadServer(conn *net.TCPConn, config TestConfig) error {
 			continue
 		}
 		// Construct and marshal header
-		dataHeader := Header{Type: Data, IncomingSize: lenDataGen}
-		dataBytes, err := marshalJSON(dataHeader)
+		dataHeader := Header{Type: Data, IncomingSize: lenDataGen, Message: BufData}
+		err = encoder.Encode(dataHeader)
+		//dataBytes, err := marshalJSON(dataHeader)
 		if err != nil {
+			fmt.Println("failure marshal data")
 			continue
 		}
-		// Add header in front of data.
-		BufData = append(dataBytes, BufData...)
-		_, err = conn.Write(BufData)
-		if err != nil {
-			// If the write failed, there is most likely something wrong with the connection.
-			return errors.New("connection closed unexpectedly")
-		}
+		//// Add header in front of data.
+		//BufData = append(dataBytes, BufData...)
+		//_, err = conn.Write(BufData)
+		//if err != nil {
+		//// If the write failed, there is most likely something wrong with the connection.
+		//return errors.New("server: connection closed unexpectedly")
+		//}
 
 	}
 	endHeader := Header{Type: End}
-	headerBytes, err := marshalJSON(endHeader)
+	err = encoder.Encode(endHeader)
+	//headerBytes, err := marshalJSON(endHeader)
+	//if err != nil {
+	//return err
+	//}
+	//_, err = conn.Write(headerBytes)
+	//TODO fix this
 	if err != nil {
-		return err
-	}
-	_, err = conn.Write(headerBytes)
-	if err != nil {
+		fmt.Println("end header")
+
 		return err
 	}
 	return nil
@@ -157,8 +166,8 @@ func marshalJSON(src interface{}) ([]byte, error) {
 	if len(b) > LenBufJSON {
 		return nil, errors.New("the given src is too large")
 	}
-	padding := make([]byte, LenBufJSON-len(b))
-	b = append(b, padding...)
+	//padding := make([]byte, LenBufJSON-len(b))
+	//b = append(b, padding...)
 
 	return b, nil
 }

@@ -5,6 +5,7 @@
 package speedtest
 
 import (
+	"fmt"
 	"net"
 	"testing"
 )
@@ -51,6 +52,7 @@ func TestDownload(t *testing.T) {
 	go (func() {
 		results, err := StartClient(conf, serverIP, serverPort)
 		if err != nil {
+			fmt.Println("client died")
 			stateChan <- state{err: err}
 		}
 		for _, result := range results {

@@ -5,7 +5,6 @@
 package speedtest
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,23 +48,25 @@ func StartClient(config TestConfig, host, port string) ([]Result, error) {
 // readJSON reads LenBufJSON number of bytes from the connection.
 // It trims the result and attempts to unmarshal the result into the given interface.
 // The given buffer must have a capacity larger than LenBufJSON.
-func readJSON(conn *net.TCPConn, buffer []byte, dest interface{}) error {
-	if cap(buffer) < LenBufJSON {
-		return errors.New("given buffer's capacity is too small")
-	}
-	buffer = buffer[:LenBufJSON]
-	_, err := io.ReadFull(conn, buffer)
-	if err != nil {
-		return err
-	}
-
-	buffer = bytes.TrimRight(buffer, "\x00")
-
-	err = json.Unmarshal(buffer, dest)
-	if err != nil {
-		fmt.Println(err)
-	}
-	return err
+func readJSON(conn *net.TCPConn, dest interface{}) error {
+	decoder := json.NewDecoder(conn)
+	return decoder.Decode(dest)
+	//if cap(buffer) < LenBufJSON {
+	//return errors.New("given buffer's capacity is too small")
+	//}
+	//buffer = buffer[:LenBufJSON]
+	//_, err := io.ReadFull(conn, buffer)
+	//if err != nil {
+	//return err
+	//}
+	//
+	//buffer = bytes.TrimRight(buffer, "\x00")
+	//
+	//err = json.Unmarshal(buffer, dest)
+	//if err != nil {
+	//fmt.Println(err)
+	//}
+	//return err
 }
 
 // readData reads lenBufData number of bytes from the connection.
@@ -89,7 +90,7 @@ func readData(conn *net.TCPConn, buffer []byte, lenBufData int) error {
 // It has a loop that breaks if the connection recieves an IO error or if the server sends a header
 // with the "end" type. It reads the headers and data coming from the server and records the number of bytes recieved in each interval in a result slice.
 func downloadClient(conn *net.TCPConn, config TestConfig) ([]Result, error) {
-	bufferData := make([]byte, MaxLenBufData)
+	//bufferData := make([]byte, MaxLenBufData)
 	var downloadBegin time.Time
 
 	sum := 0
@@ -98,10 +99,15 @@ func downloadClient(conn *net.TCPConn, config TestConfig) ([]Result, error) {
 	breakLoop := false
 	var results []Result
 
+	decoder := json.NewDecoder(conn)
+
 	for {
 		var header Header
-		err := readJSON(conn, bufferData, &header)
+		//err := readJSON(conn, &header)
+		err := decoder.Decode(&header)
+		fmt.Println(header.Type)
 		if err != nil {
+			fmt.Println("client err:", err)
 			//worst case scenario: the server closes the connection and the client quits
 			if err == io.EOF {
 				return nil, errors.New("connection closed unexpectedly")
@@ -120,9 +126,12 @@ func downloadClient(conn *net.TCPConn, config TestConfig) ([]Result, error) {
 
 			breakLoop = true
 		case Data:
-			if err = readData(conn, bufferData, header.IncomingSize); err != nil {
-				return nil, errors.New("failed to read incoming data")
-			}
+			//fmt.Println("header incoming size", header.IncomingSize)
+			//if err = readData(conn, bufferData, header.IncomingSize); err != nil {
+			//return nil, errors.New("failed to read incoming data")
+			//}
+			fmt.Println("data len", len(header.Message), "incoming size", header.IncomingSize)
+			//	fmt.Println(string(header.Message))
 			sum += LenBufJSON + header.IncomingSize
 		}
 

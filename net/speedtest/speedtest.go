@@ -23,6 +23,7 @@ const (
 type Header struct {
 	Type         string `json:"type"`
 	IncomingSize int    `json:"incoming_size,omitempty"`
+	Message      []byte `json:"random_bytes,omitempty"`
 }
 
 // This is the initial message sent to the sever, that contains information on how to
